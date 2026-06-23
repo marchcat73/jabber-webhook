@@ -5,22 +5,22 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use xmpp::XmppClient;
 use serde::Deserialize;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
+use xmpp::jid::BareJid;
+use xmpp::message::send::MessageSettings;
+use xmpp::{Agent, ClientBuilder};
 
-// Структура для состояния приложения
+// ---- Структуры ----
 #[derive(Clone)]
 struct AppState {
-    xmpp_client: Arc<Mutex<Option<XmppClient>>>,
-    recipient_jid: String,
-    bot_jid: String,
-    bot_password: String,
+    xmpp_agent: Arc<Mutex<Option<Agent>>>,
+    recipient_jid: BareJid,
 }
 
-// Структура данных, которую ожидаем от Next.js
 #[derive(Debug, Deserialize)]
 struct WebhookPayload {
     name: String,
@@ -28,59 +28,68 @@ struct WebhookPayload {
     message: String,
 }
 
-// Ответ сервера
 #[derive(Debug, serde::Serialize)]
 struct WebhookResponse {
     success: bool,
     message: String,
 }
 
-// POST эндпоинт для приема сообщений
+// ---- XMPP логика ----
+/// Инициализация XMPP агента
+async fn init_xmpp_agent(
+    bot_jid: &str,
+    bot_password: &str,
+) -> Result<Agent, anyhow::Error> {
+    info!("Подключение к XMPP серверу как {}", bot_jid);
+
+    // В xmpp 0.7.0 используется BareJid для подключения
+    let bare_jid = BareJid::from_str(bot_jid)?;
+
+    // Создаем агент через ClientBuilder
+    let agent = ClientBuilder::new(bare_jid, bot_password).build();
+
+    info!("XMPP агент успешно создан");
+    Ok(agent)
+}
+
+// ---- HTTP обработчики ----
 async fn webhook_handler(
     State(state): State<AppState>,
     Json(payload): Json<WebhookPayload>,
 ) -> impl IntoResponse {
-    info!("Получено сообщение от {} ({})", payload.name, payload.email);
+    info!(
+        "Получено сообщение от {} ({})",
+        payload.name, payload.email
+    );
 
-    // Формируем сообщение для Jabber
     let jabber_message = format!(
-        "Новое сообщение с сайта:\n\n\
-         Имя: {}\n\
-         Email: {}\n\
-         Сообщение:\n{}",
+        "Новое сообщение с сайта:\n\nИмя: {}\nEmail: {}\nСообщение:\n{}",
         payload.name, payload.email, payload.message
     );
 
-    // Отправляем в Jabber
-    let mut client_guard = state.xmpp_client.lock().await;
+    let mut agent_guard = state.xmpp_agent.lock().await;
 
-    match client_guard.as_mut() {
-        Some(client) => {
-            match client.send_message(&state.recipient_jid, &jabber_message).await {
-                Ok(_) => {
-                    info!("Сообщение успешно отправлено в Jabber");
-                    (
-                        StatusCode::OK,
-                        Json(WebhookResponse {
-                            success: true,
-                            message: "Сообщение успешно отправлено".to_string(),
-                        }),
-                    )
-                }
-                Err(e) => {
-                    error!("Ошибка отправки в Jabber: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(WebhookResponse {
-                            success: false,
-                            message: format!("Ошибка отправки: {}", e),
-                        }),
-                    )
-                }
-            }
+    match agent_guard.as_mut() {
+        Some(agent) => {
+            // Формируем настройки сообщения
+            let settings = MessageSettings::new(state.recipient_jid.clone(), &jabber_message);
+
+            // Отправляем сообщение.
+            // Метод асинхронный, но не возвращает Result, так как передача
+            // происходит через внутренние каналы tokio-xmpp.
+            agent.send_message(settings).await;
+
+            info!("Сообщение успешно передано в Jabber");
+            (
+                StatusCode::OK,
+                Json(WebhookResponse {
+                    success: true,
+                    message: "Сообщение успешно отправлено".to_string(),
+                }),
+            )
         }
         None => {
-            error!("XMPP клиент не инициализирован");
+            error!("XMPP агент не инициализирован");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(WebhookResponse {
@@ -92,143 +101,48 @@ async fn webhook_handler(
     }
 }
 
-// Результат инициализации XMPP клиента
-struct XmppInitResult {
-    client: XmppClient,
-    events: tokio::sync::mpsc::Receiver<xmpp::XmppEvent>,
-}
-
-// Функция инициализации XMPP клиента
-async fn init_xmpp_client(bot_jid: &str, bot_password: &str) -> Result<XmppInitResult, anyhow::Error> {
-    info!("Подключение к XMPP серверу как {}", bot_jid);
-    let (client, events) = XmppClient::new(bot_jid, bot_password).await?;
-    Ok(XmppInitResult { client, events })
-}
-
-// Фоновая задача для обработки событий XMPP и переподключения
-async fn xmpp_event_loop(
-    mut events: tokio::sync::mpsc::Receiver<xmpp::XmppEvent>,
-    xmpp_client: Arc<Mutex<Option<XmppClient>>>,
-    bot_jid: String,
-    bot_password: String,
-) {
-    const RECONNECT_DELAY_SECS: u64 = 5;
-    const MAX_RECONNECT_DELAY_SECS: u64 = 60;
-
-    let mut current_delay = RECONNECT_DELAY_SECS;
-
-    loop {
-        // Ждём события пока канал открыт
-        while let Some(_) = events.recv().await {
-            // Получили событие - соединение активно
-        }
-
-        // Канал закрыт - клиент отключился, пробуем переподключиться
-        warn!("XMPP соединение потеряно (канал событий закрыт)");
-
-        loop {
-            info!(
-                "Попытка переподключения через {} сек...",
-                current_delay
-            );
-
-            // Копируем данные для переподключения
-            let retry_client = xmpp_client.clone();
-            let retry_bot_jid = bot_jid.clone();
-            let retry_bot_password = bot_password.clone();
-
-            // Ждем перед переподключением
-            tokio::time::sleep(tokio::time::Duration::from_secs(current_delay)).await;
-
-            // Увеличиваем задержку для следующей попытки (экспоненциальный backoff)
-            current_delay = (current_delay * 2).min(MAX_RECONNECT_DELAY_SECS);
-
-            // Пробуем переподключиться
-            match init_xmpp_client(&retry_bot_jid, &retry_bot_password).await {
-                Ok(init_result) => {
-                    info!("Успешно переподключен к XMPP серверу");
-                    *retry_client.lock().await = Some(init_result.client);
-                    current_delay = RECONNECT_DELAY_SECS; // Сбрасываем задержку
-
-                    // Обновляем events для нового подключения
-                    events = init_result.events;
-                    break; // Выходим из внутреннего цикла, продолжаем ждать события
-                }
-                Err(e) => {
-                    error!(
-                        "Не удалось переподключиться (следующая попытка через {} сек): {:?}",
-                        current_delay, e
-                    );
-                    // Продолжаем пытаться переподключиться
-                }
-            }
-        }
-    }
-}
-
+// ---- Главная функция ----
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Загружаем переменные окружения
     dotenvy::dotenv().ok();
 
-    // Настраиваем логирование
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // Читаем настройки из .env
-    let bot_jid = std::env::var("BOT_JID")
-        .expect("BOT_JID не задан в .env");
-    let bot_password = std::env::var("BOT_PASSWORD")
-        .expect("BOT_PASSWORD не задан в .env");
-    let recipient_jid = std::env::var("RECIPIENT_JID")
-        .expect("RECIPIENT_JID не задан в .env");
-    let server_host = std::env::var("SERVER_HOST")
-        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    // Убраны лишние пробелы в названиях переменных окружения
+    let bot_jid = std::env::var("BOT_JID").expect("BOT_JID не задан в .env");
+    let bot_password = std::env::var("BOT_PASSWORD").expect("BOT_PASSWORD не задан в .env");
+    let recipient_jid_raw = std::env::var("RECIPIENT_JID").expect("RECIPIENT_JID не задан в .env");
+
+    let server_host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let server_port = std::env::var("SERVER_PORT")
-        .unwrap_or_else(|_| "8080".to_string())
+        .unwrap_or_else(|_| "8082".to_string())
         .parse::<u16>()
         .expect("SERVER_PORT должен быть числом");
 
-    // Инициализируем XMPP клиент
-    info!("Инициализация XMPP клиента...");
-    let xmpp_client = match init_xmpp_client(&bot_jid, &bot_password).await {
-        Ok(init_result) => {
-            info!("XMPP клиент успешно инициализирован");
+    let recipient_jid = BareJid::from_str(&recipient_jid_raw)?;
 
-            // Запускаем фоновую задачу для обработки событий XMPP
-            let initial_events = init_result.events;
-            let first_client = init_result.client;
+    let shared_agent = Arc::new(Mutex::new(None));
 
-            // Создаем клонируемый клиент через Option (для переподключения)
-            let client_for_loop = Arc::new(Mutex::new(Some(first_client)));
-
-            tokio::spawn(xmpp_event_loop(
-                initial_events,
-                client_for_loop.clone(),
-                bot_jid.clone(),
-                bot_password.clone(),
-            ));
-
-            // Сохраняем клиент для webhook handler
-            // Примечание: после переподключения клиент будет обновлен в client_for_loop
-            None
+    info!("Инициализация XMPP агента...");
+    match init_xmpp_agent(&bot_jid, &bot_password).await {
+        Ok(agent) => {
+            info!("XMPP агент успешно инициализирован");
+            *shared_agent.lock().await = Some(agent);
+            // Фоновая задача keepalive больше не нужна: Agent внутри tokio-xmpp
+            // сам запускает необходимые задачи для поддержания соединения.
         }
         Err(e) => {
-            error!("Не удалось инициализировать XMPP клиент: {}", e);
-            None
+            error!("Не удалось инициализировать XMPP агент: {}", e);
         }
     };
 
-    // Создаем состояние приложения
     let state = AppState {
-        xmpp_client: Arc::new(Mutex::new(xmpp_client)),
+        xmpp_agent: shared_agent,
         recipient_jid,
-        bot_jid,
-        bot_password,
     };
 
-    // Создаем маршруты
     let app = Router::new()
         .route("/webhook", post(webhook_handler))
         .with_state(state);
@@ -237,7 +151,6 @@ async fn main() -> anyhow::Result<()> {
     info!("Сервер запущен на {}", addr);
     info!("POST эндпоинт: http://{}/webhook", addr);
 
-    // Запускаем сервер
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
