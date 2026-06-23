@@ -40,7 +40,7 @@ async fn init_xmpp_agent(
     bot_jid: &str,
     bot_password: &str,
 ) -> Result<Agent, anyhow::Error> {
-    info!("Подключение к XMPP серверу как {}", bot_jid);
+    info!("Connecting to an XMPP server {}", bot_jid);
 
     // В xmpp 0.7.0 используется BareJid для подключения
     let bare_jid = BareJid::from_str(bot_jid)?;
@@ -48,7 +48,7 @@ async fn init_xmpp_agent(
     // Создаем агент через ClientBuilder
     let agent = ClientBuilder::new(bare_jid, bot_password).build();
 
-    info!("XMPP агент успешно создан");
+    info!("XMPP agent successfully created");
     Ok(agent)
 }
 
@@ -58,12 +58,12 @@ async fn webhook_handler(
     Json(payload): Json<WebhookPayload>,
 ) -> impl IntoResponse {
     info!(
-        "Получено сообщение от {} ({})",
+        "Received message from {} ({})",
         payload.name, payload.email
     );
 
     let jabber_message = format!(
-        "Новое сообщение с сайта:\n\nИмя: {}\nEmail: {}\nСообщение:\n{}",
+        "New message from the site:\n\nName: {}\nEmail: {}\nMessage:\n{}",
         payload.name, payload.email, payload.message
     );
 
@@ -79,22 +79,22 @@ async fn webhook_handler(
             // происходит через внутренние каналы tokio-xmpp.
             agent.send_message(settings).await;
 
-            info!("Сообщение успешно передано в Jabber");
+            info!("The message was successfully sent to Jabber.");
             (
                 StatusCode::OK,
                 Json(WebhookResponse {
                     success: true,
-                    message: "Сообщение успешно отправлено".to_string(),
+                    message: "The message has been sent successfully.".to_string(),
                 }),
             )
         }
         None => {
-            error!("XMPP агент не инициализирован");
+            error!("XMPP agent not initialized");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(WebhookResponse {
                     success: false,
-                    message: "Сервис временно недоступен".to_string(),
+                    message: "The service is temporarily unavailable.".to_string(),
                 }),
             )
         }
@@ -110,31 +110,30 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // Убраны лишние пробелы в названиях переменных окружения
-    let bot_jid = std::env::var("BOT_JID").expect("BOT_JID не задан в .env");
-    let bot_password = std::env::var("BOT_PASSWORD").expect("BOT_PASSWORD не задан в .env");
-    let recipient_jid_raw = std::env::var("RECIPIENT_JID").expect("RECIPIENT_JID не задан в .env");
+    let bot_jid = std::env::var("BOT_JID").expect("BOT_JID not specified in .env");
+    let bot_password = std::env::var("BOT_PASSWORD").expect("BOT_PASSWORD not specified in .env");
+    let recipient_jid_raw = std::env::var("RECIPIENT_JID").expect("RECIPIENT_JID not specified in .env");
 
     let server_host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let server_port = std::env::var("SERVER_PORT")
         .unwrap_or_else(|_| "8082".to_string())
         .parse::<u16>()
-        .expect("SERVER_PORT должен быть числом");
+        .expect("SERVER_PORT must be a number");
 
     let recipient_jid = BareJid::from_str(&recipient_jid_raw)?;
 
     let shared_agent = Arc::new(Mutex::new(None));
 
-    info!("Инициализация XMPP агента...");
+    info!("Initializing the XMPP agent...");
     match init_xmpp_agent(&bot_jid, &bot_password).await {
         Ok(agent) => {
-            info!("XMPP агент успешно инициализирован");
+            info!("XMPP agent initialized successfully");
             *shared_agent.lock().await = Some(agent);
             // Фоновая задача keepalive больше не нужна: Agent внутри tokio-xmpp
             // сам запускает необходимые задачи для поддержания соединения.
         }
         Err(e) => {
-            error!("Не удалось инициализировать XMPP агент: {}", e);
+            error!("Failed to initialize XMPP agent: {}", e);
         }
     };
 
@@ -148,8 +147,8 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = format!("{}:{}", server_host, server_port);
-    info!("Сервер запущен на {}", addr);
-    info!("POST эндпоинт: http://{}/webhook", addr);
+    info!("The server is running on {}", addr);
+    info!("POST endpoint: http://{}/webhook", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
