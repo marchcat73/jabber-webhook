@@ -1,3 +1,4 @@
 /target
 .env
 password_open_pgp.txt
+jabber-webhook.service

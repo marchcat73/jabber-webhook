@@ -72,6 +72,7 @@ After=network.target
 [Service]
 Type=simple
 User=your_user
+Group=your_user
 WorkingDirectory=/path/to/jabber-webhook
 EnvironmentFile=/path/to/jabber-webhook/.env
 ExecStart=/path/to/jabber-webhook/target/release/jabber-webhook
@@ -111,10 +112,7 @@ resource found while parsing a bare JID
     ❌ BOT_JID=user@domain.com/bot
     ✅ BOT_JID=user@domain.com
 
-Connection timeout
 
-    Make sure your XMPP server is reachable
-    Check firewall rules for ports 5222 (XMPP) and 5223 (XMPP over TLS)
 
 📄 License
 This project is licensed under the MIT License — see the LICENSE
